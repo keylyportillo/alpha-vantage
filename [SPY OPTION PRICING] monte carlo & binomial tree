@@ -1,0 +1,225 @@
+# SPY Option Pricing Model with Binomial Trees and Monte Carlo Simulation
+
+import requests
+import pandas as pd
+import numpy as np
+import math
+import matplotlib.pyplot as plt
+
+
+key = '&apikey=meep' 
+ticker = '&symbol=SPY'
+endpoint = 'function=TIME_SERIES_DAILY_ADJUSTED'
+size = '&outputsize=full'
+web = 'https://www.alphavantage.co/query?'
+url = web + endpoint + ticker + size + key
+print(f"Fetching data from: {url}")
+
+# SPY historical data
+r = requests.get(url)
+if r.status_code == 200:
+    data = r.json()
+    r1 = data['Time Series (Daily)']
+    
+    # Get the last 252 trading days 
+    keys_list = list(r1.keys())
+    keys_list1 = keys_list[0:252]
+    
+    # Adjusted close prices
+    clean = [] 
+    for j in range(len(keys_list1)):
+        date = keys_list1[j]
+        clean.append(float(r1[date]['5. adjusted close']))
+    
+    # Calculate log returns
+    returns = []
+    for i in range(1, len(clean)-1, 1):
+        returns.append(np.log(clean[i]) - np.log(clean[i+1]))
+else:
+    print(f"Error fetching SPY data: {r.status_code}")
+    clean = []
+    returns = []
+
+# Fed Funds Rate data
+riskfree = []
+url = 'https://www.alphavantage.co/query?function=FEDERAL_FUNDS_RATE&interval=daily' + key
+r = requests.get(url)
+if r.status_code == 200:
+    r1 = r.json()
+    r2 = r1['data'][0:365]
+    
+    for i in range(len(r2)):
+        temp = float(r2[i]['value']) / 100
+        riskfree.append(temp)
+else:
+    print(f"Error fetching Fed Funds Rate: {r.status_code}")
+    riskfree = [0.05]  # change if API fails 
+
+# 3-month T-Bill rate as an alternative risk-free rate
+url = 'https://www.alphavantage.co/query?function=TREASURY_YIELD&interval=monthly&maturity=3month' + key
+r = requests.get(url)
+if r.status_code == 200:
+    r1 = r.json()
+    rftbill = float(r1['data'][0]['value']) / 100
+    datetbill = r1['data'][0]['date']
+    rfcc = np.log(1 + rftbill) # convert to continuous compounding
+    
+    print(f"Current 3-month T-Bill yield: {rftbill:.4f} as of {datetbill}")
+else:
+    print(f"Error fetching Treasury yield data: {r.status_code}")
+    rftbill = 0.05
+    rfcc = np.log(1 + rftbill)
+
+# Calculate statistics from the historical data
+if returns:
+    time_series = pd.DataFrame(returns)
+    mean = time_series[0].mean()
+    mean_yearly = np.log(1 + mean * 252)  # annualized returns 
+    
+    sigma = time_series[0].std()  # daily volatility
+    sigma_yearly = sigma * (252 ** 0.5)  # annualized volatility
+    
+    time_series1 = pd.DataFrame(riskfree)
+    meanrf_yearly = np.log(1 + time_series1[0].mean())  # annual risk-free rate
+    
+    print(f"Annualized mean return: {mean_yearly:.4f}")
+    print(f"Annualized risk-free rate: {meanrf_yearly:.4f}")
+    print(f"Annualized volatility: {sigma_yearly:.4f}")
+else:
+    # enter manually if API fails 
+    mean_yearly = 0.08
+    meanrf_yearly = 0.05
+    sigma_yearly = 0.15
+    print("Using default values due to API failure")
+
+# Parameters for binomial tree models (enter manually)
+
+S0 = 561  # Initial stock price
+T = 0.25  # Time horizon in years (3 months)
+n = 63    # Number of steps
+h = T / n  # Time step
+div = 0.015  # Dividend yield 
+
+# 1. Forward Tree model
+u_fwd = math.exp((meanrf_yearly - div) * h + sigma_yearly * h**0.5)
+d_fwd = math.exp((meanrf_yearly - div) * h - sigma_yearly * h**0.5)
+q_fwd = (math.exp(mean_yearly * h) - d_fwd) / (u_fwd - d_fwd)
+print(f"\nForward Tree parameters: u={u_fwd:.4f}, d={d_fwd:.4f}, q={q_fwd:.4f}")
+
+# 2. Cox-Ross-Rubinstein (CCR) model
+u_ccr = math.exp(sigma_yearly * h**0.5)
+d_ccr = math.exp(-sigma_yearly * h**0.5)
+q_ccr = (math.exp(mean_yearly * h) - d_ccr) / (u_ccr - d_ccr)
+print(f"CCR Tree parameters: u={u_ccr:.4f}, d={d_ccr:.4f}, q={q_ccr:.4f}")
+
+# 3. Jarrow-Rudd (JR) model
+u_jr = math.exp((meanrf_yearly - div - 0.5 * sigma_yearly**2) * h + sigma_yearly * h**0.5)
+d_jr = math.exp((meanrf_yearly - div - 0.5 * sigma_yearly**2) * h - sigma_yearly * h**0.5)
+q_jr = (math.exp(mean_yearly * h) - d_jr) / (u_jr - d_jr)
+print(f"JR Tree parameters: u={u_jr:.4f}, d={d_jr:.4f}, q={q_jr:.4f}")
+
+# Calculate example prices using different models
+print("\nExample Price Calculations:")
+for up_moves, down_moves, start_price in [(10, 8, 561), (15, 9, 474), (30, 10, 474)]:
+    Sfwd = start_price * u_fwd**up_moves * d_fwd**down_moves
+    Sccr = start_price * u_ccr**up_moves * d_ccr**down_moves
+    Sjr = start_price * u_jr**up_moves * d_jr**down_moves
+    print(f"Starting at ${start_price} with {up_moves} up and {down_moves} down moves:")
+    print(f"  Forward Tree: ${Sfwd:.2f}")
+    print(f"  CCR Tree: ${Sccr:.2f}")
+    print(f"  JR Tree: ${Sjr:.2f}")
+
+# Simulate a single price path using Forward Tree model
+
+np.random.seed(4460)  # for reproducibility
+sequence1_fwd = np.random.choice([0, 1], size=n, p=[1-q_fwd, q_fwd])
+prices_fwd = []
+
+# Starting with initial price
+current_price = S0
+
+# Calculate all subsequent prices
+for i in range(len(sequence1_fwd)):
+    # Calculate the next price based on up or down movement
+    current_price = current_price * (sequence1_fwd[i] * u_fwd + (1 - sequence1_fwd[i]) * d_fwd)
+    prices_fwd.append(current_price)
+
+# Plot the single path simulation
+plt.figure(figsize=(10, 6))
+# Create correct steps array with initial step
+full_steps = list(range(len(prices_fwd) + 1))
+# Plot with initial price and subsequent prices
+plt.plot(full_steps, [S0] + prices_fwd, label='Prices Fwd Tree, Seed=4460', marker='o')
+plt.xlabel('Steps')
+plt.ylabel('Price')
+plt.title('Single Path Simulation using Forward Tree Model')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Compute risk-neutral probability using 3-month T-bill and CCR model
+qrn = (math.exp(rfcc * h) - d_ccr) / (u_ccr - d_ccr)
+print(f"\nRisk-neutral probability: {qrn:.4f}")
+
+# Monte Carlo simulation with 10,000 paths using CCR model (manual)
+print("\nRunning Monte Carlo simulation with 10,000 paths...")
+n_sims = 10000
+S0_current = 602.01  # Current stock price for MC simulation
+prices_ccr = [] 
+
+for k in range(n_sims):
+    np.random.seed(k)  # Seed for each simulation
+    sequence1_ccr = np.random.choice([0, 1], size=n, p=[1-qrn, qrn])  # Risk-neutral path
+    
+    # Initialize with starting price
+    tempp = [S0_current]
+    steps = [0]
+    
+    # Generate path
+    for i in range(len(sequence1_ccr)):
+        temp1 = tempp[-1] * (sequence1_ccr[i] * u_ccr + (1 - sequence1_ccr[i]) * d_ccr)
+        tempp.append(temp1)
+    
+    prices_ccr.append(tempp)
+
+# Create a new plot for Monte Carlo paths
+plt.figure(figsize=(12, 8))
+
+# Plot only first 10 simulations for visualization
+for k in range(min(10, n_sims)):
+    steps = list(range(len(prices_ccr[k])))
+    plt.plot(steps, prices_ccr[k], label=f'Simulation {k+1}' if k < 5 else "")
+
+# Extract final prices from all simulations
+lastprices = [path[-1] for path in prices_ccr]
+
+# Calculate call option payoff (Strike price = 601)
+strike = 601
+payoff = [max(0, price - strike) for price in lastprices]
+print(f"Sample payoffs: {payoff[:10]}")
+
+# Option price is the discounted expected payoff
+option_price = (sum(payoff) / len(payoff)) * math.exp(-rfcc * T)
+print(f"Call option price: ${option_price:.2f}")
+
+# Calculate buy and hold return
+if clean:
+    buy_hold_return = np.log(lastprices[0]) - np.log(S0_current)
+    print(f"Expected buy-and-hold log return: {buy_hold_return:.4f}")
+
+# Statistical analysis of final prices
+final_prices_df = pd.DataFrame(lastprices, columns=['Final Price'])
+print("\nStatistics of final prices from Monte Carlo:")
+print(final_prices_df.describe())
+
+# Histogram of final prices
+plt.figure(figsize=(10, 6))
+plt.hist(lastprices, bins=50, alpha=0.7, color='blue')
+plt.axvline(strike, color='red', linestyle='--', label=f'Strike Price (${strike})')
+plt.axvline(final_prices_df['Final Price'].mean(), color='green', linestyle='-', label='Mean')
+plt.xlabel('Final Price')
+plt.ylabel('Frequency')
+plt.title('Distribution of Final Prices from Monte Carlo Simulation')
+plt.legend()
+plt.grid(True)
+plt.show()
