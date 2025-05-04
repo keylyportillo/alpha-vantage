@@ -1,0 +1,62 @@
+# solving margin allocation and finding optimal portolio weight given cov matrix, expected ret, and rf rate 
+
+import numpy as np
+
+def solve_tangency_portfolio(sigma, mu, rf):
+    # inverse of sigma
+    sigma_inv = np.linalg.inv(sigma)
+    
+    #  excess return over risk-free rate
+    excess_mu = mu - rf
+    
+    # Vector of ones
+    ones = np.ones(len(mu))
+    
+    # tangency portfolio weights
+    w_tangency = sigma_inv @ excess_mu / (ones.T @ sigma_inv @ excess_mu)
+    
+    return w_tangency
+
+
+## Example with dummy values ## 
+sigma = np.array([[0.1, 0, -0.09],
+                  [0, 0.2, 0.03],
+                  [-0.09, 0.03, 0.04]])  # covariance matrix
+mu = np.array([0.1, 0.2, 0.12])  # Expected returns
+rf = 0.03  # Risk-free rate
+
+# w_tangency = solve_tangency_portfolio(sigma, mu, rf)
+
+# print("Tangency Portfolio Weights:", w_tangency)
+
+#solving for margin allocation 
+
+def solve_margin_allocation(kA, kB, kC, wA, wB, wC, I):
+  
+  # Coefficient matrix A  
+    A = np.array([
+        [1/kA * np.sign(wA), 0, 0, -wA],
+        [0, 1/kB * np.sign(wB), 0, -wB],
+        [0, 0, 1/kC * np.sign(wC), -wC],
+        [1, 1, 1, 0]
+    ])
+    
+    # Constraint vector C
+    C = np.array([0, 0, 0, I])
+    
+    # Solve for [mA, mB, mC, P]
+    solution = np.linalg.solve(A, C)
+    
+    # Extract individual values
+    mA, mB, mC, P = solution
+    
+    return mA, mB, mC, P
+
+# Example usage with dummy values
+kA, kB, kC = 1.5, 2.0, 2.5  
+wA, wB, wC = 0.3, -0.2, 0.5  
+I = 100000  # Total available margin
+
+mA, mB, mC, P = solve_margin_allocation(kA, kB, kC, wA, wB, wC, I)
+
+print(f"mA: {mA}, mB: {mB}, mC: {mC}, P: {P}")
