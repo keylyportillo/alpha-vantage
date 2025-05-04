@@ -1,0 +1,174 @@
+import requests
+import pandas as pd
+import numpy as np 
+import matplotlib.pyplot as plt 
+from scipy.stats import ttest_1samp
+from datetime import datetime
+import matplotlib.dates as mdates
+
+#pulling the data 
+key='&apikey= 'teehee'
+ticker='&symbol= 'LLY'
+endpoint='function=TIME_SERIES_DAILY_ADJUSTED'
+size='&outputsize=compact'
+web='https://www.alphavantage.co/query?'
+tic = 'SPY'
+url = web+endpoint+ticker+size+key
+print(f"Requesting data from: {url}")
+
+r = requests.get(url)
+print(f"Response status code: {r.status_code}")
+
+if r.status_code != 200:
+    print("Error fetching data. Please check your API key and connection.")
+    exit()
+
+data = r.json()
+
+# Convert to DF
+prices_dict = data['Time Series (Daily)']
+df = pd.DataFrame.from_dict(prices_dict, orient='index')
+
+# Convert string prices to float
+for col in df.columns:
+    df[col] = df[col].astype(float)
+
+# Rename columns 
+df.columns = ['open', 'high', 'low', 'close', 'adjusted_close', 'volume', 'dividend', 'split']
+df.index = pd.to_datetime(df.index)
+df = df.sort_index()  # Sort by date ascending
+
+# Take the last 100 days
+df = df.tail(100)
+
+# Calculate moving averages
+df['ma3'] = df['adjusted_close'].rolling(window=3).mean()
+df['ma5'] = df['adjusted_close'].rolling(window=5).mean()
+df['ma10'] = df['adjusted_close'].rolling(window=10).mean()
+
+# Create trading signals
+df['signal'] = 0
+df['signal'] = np.where(df['adjusted_close'] > df['ma3'].shift(1), 1, 0)
+
+# Calculate returns (daily and strategy)
+df['daily_return'] = np.log(df['adjusted_close'] / df['adjusted_close'].shift(1))
+df['strategy_return'] = np.where(df['signal'].shift(1) == 1, 
+                                df['daily_return'], 
+                                -df['daily_return'])  # Short when signal is 0
+
+# Calculate cumulative returns
+df['cum_market_return'] = df['daily_return'].cumsum()
+df['cum_strategy_return'] = df['strategy_return'].cumsum()
+
+# Drop NaN values for analysis
+df_analysis = df.dropna()
+
+# Performance metrics
+total_days = len(df_analysis)
+win_days = sum(df_analysis['strategy_return'] > 0)
+win_rate = win_days / total_days
+
+# Calculate Sharpe Ratio (annualized)
+sharpe_ratio = np.sqrt(252) * df_analysis['strategy_return'].mean() / df_analysis['strategy_return'].std()
+
+# Calculate maximum drawdown
+df_analysis['cum_strategy_return_peak'] = df_analysis['cum_strategy_return'].cummax()
+df_analysis['drawdown'] = df_analysis['cum_strategy_return_peak'] - df_analysis['cum_strategy_return']
+max_drawdown = df_analysis['drawdown'].max()
+
+# Statistical analysis
+strategy_returns = df_analysis['strategy_return'].values
+t_stat, p_value = ttest_1samp(strategy_returns, 0)
+
+# TEST - Manual t-stat calculation as a check
+manual_tstat = (np.mean(strategy_returns) - 0) / (np.std(strategy_returns, ddof=1) / np.sqrt(len(strategy_returns)))
+
+# Print performance summary
+print("\n===== STRATEGY PERFORMANCE SUMMARY =====")
+print(f"Total trading days: {total_days}")
+print(f"Win rate: {win_rate:.2%}")
+print(f"Average daily return: {df_analysis['strategy_return'].mean():.4%}")
+print(f"Cumulative return: {df_analysis['cum_strategy_return'].iloc[-1]:.2%}")
+print(f"Market return: {df_analysis['cum_market_return'].iloc[-1]:.2%}")
+print(f"Sharpe ratio: {sharpe_ratio:.2f}")
+print(f"Maximum drawdown: {max_drawdown:.2%}")
+print("\n===== STATISTICAL ANALYSIS =====")
+print(f"T-statistic: {t_stat:.4f}")
+print(f"P-value: {p_value:.4f}")
+print(f"Statistical significance: {'Yes' if p_value < 0.05 else 'No'}")
+
+# Create visuals 
+plt.figure(figsize=(15, 15))
+
+# Plot 1: Price and Moving Averages
+plt.subplot(3, 1, 1)
+plt.plot(df.index, df['adjusted_close'], label='SPY Price', color='black') #stock prices @ adjusted close 
+plt.plot(df.index, df['ma3'], label='3-day SMA', color='pink') # 3-day SMA 
+plt.plot(df.index, df['ma5'], label='5-day SMA', color='blue', linestyle='--') # 5-day SMA
+plt.plot(df.index, df['ma10'], label='10-day SMA', color='red', linestyle='-.') #10-day SMA 
+plt.title('SPY Price and Moving Averages')
+plt.xlabel('Date')
+plt.ylabel('Price ($)')
+plt.legend()
+plt.grid(True)
+
+# Format x-axis dates
+plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+plt.gca().xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+plt.xticks(rotation=45)
+
+# Plot 2: Trading Signals
+plt.subplot(3, 1, 2)
+plt.plot(df.index, df['adjusted_close'], color='black', alpha=0.5)
+# Use different colors for buy and sell signals
+buy_signals = df[df['signal'] == 1].index
+sell_signals = df[df['signal'] == 0].index
+plt.scatter(buy_signals, df.loc[buy_signals, 'adjusted_close'], color='green', marker='^', s=100, label='Buy') #buy signal 
+plt.scatter(sell_signals, df.loc[sell_signals, 'adjusted_close'], color='red', marker='v', s=100, label='Sell/Short') #sell signal 
+plt.title('Trading Signals')
+plt.xlabel('Date')
+plt.ylabel('Price ($)')
+plt.legend()
+plt.grid(True)
+
+# Format x-axis dates
+plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+plt.gca().xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+plt.xticks(rotation=45)
+
+# Plot 3: Cumulative Returns Comparison
+plt.subplot(3, 1, 3)
+plt.plot(df_analysis.index, df_analysis['cum_market_return'], label='Buy & Hold', color='blue') # $ made by buying and holding SPY (benchmark)
+plt.plot(df_analysis.index, df_analysis['cum_strategy_return'], label='Strategy', color='green') # $ made buying and holding using the strategy 
+plt.title('Cumulative Returns: Strategy vs Market')
+plt.xlabel('Date')
+plt.ylabel('Cumulative Return')
+plt.legend()
+plt.grid(True)
+
+# Format x-axis dates
+plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+plt.gca().xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+plt.xticks(rotation=45)
+
+plt.tight_layout()
+plt.savefig('trading_strategy_analysis.png')
+plt.show()
+
+# Additional plot for drawdowns
+plt.figure(figsize=(15, 6))
+plt.plot(df_analysis.index, df_analysis['drawdown'], color='red')
+plt.fill_between(df_analysis.index, df_analysis['drawdown'], color='red', alpha=0.3)
+plt.title('Strategy Drawdowns')
+plt.xlabel('Date')
+plt.ylabel('Drawdown')
+plt.grid(True)
+plt.tight_layout()
+plt.savefig('drawdowns.png')
+plt.show()
+
+''' 
+# Save the trading data to CSV if needed
+df.to_csv('trading_strategy_data.csv')
+print("\nData saved to 'trading_strategy_data.csv'")
+print("Plots saved as 'trading_strategy_analysis.png' and 'drawdowns.png'")
