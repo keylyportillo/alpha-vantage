@@ -1,0 +1,168 @@
+# calculates Relative Strength Index (RSI) for stocks (max = 20). Produces graph and distribution and shows stat significance (input API) 
+
+import numpy as np
+import pandas as pd
+import requests
+import scipy.stats as stats
+import matplotlib.pyplot as plt
+
+
+# STEP 0
+def api_pull(web='alphavantage.co', function='TIME_SERIES_DAILY_ADJUSTED', **kwargs):
+    url = f'https://{web}/query?function={function}' + ''.join([f'&{k}={v}' for k, v in kwargs.items()])
+    r = requests.get(url)
+    data = r.json()
+    return data
+
+
+def model_prices(data, date_start, date_end):
+    symbol = data['Meta Data']['2. Symbol']
+    info = [[symbol, date, float(prices['5. adjusted close'])] for date, prices in data['Time Series (Daily)'].items()]
+
+    # filter date
+    df = pd.DataFrame(info, columns=['ticker', 'date', 'adj_close'])
+    df = df[(df.date >= date_start) & (df.date <= date_end)].reset_index(drop=True)
+
+    # calculate log returns
+    df['prev_adj_close'] = df['adj_close'].shift(-1)
+
+    df = df[::-1].reset_index()
+    # df['retx'] = np.array(np.log(df.adj_close) - np.log(df.prev_adj_close))
+
+    return df
+
+
+def statistical_significance(returns, alpha=0.05):
+    """
+    Basic test of statistical significance for investment returns
+    """
+    # convert to numpy array and remove NaNs
+    returns = np.array(returns)
+    returns = returns[~np.isnan(returns)]
+
+    # calculate mean return
+    mean_return = np.mean(returns)
+
+    # perform one-sample t-test (testing if returns are different from zero)
+    t_stat, p_value = stats.ttest_1samp(returns, 0)
+
+    # check if result is statistically significant
+    is_significant = p_value < alpha
+
+    # Return results
+    results = {
+        'mean_return': mean_return,
+        't_statistic': t_stat,
+        'p_value': p_value,
+        'significant': is_significant,
+        'alpha': alpha
+    }
+
+    return results
+
+
+def rsi(df, lookback=14, overbought=70, oversold=30):
+    # calculate gains and losses
+    df['gains'] = [max(0, gain) for gain in df.adj_close - df.prev_adj_close]
+    df['losses'] = [max(0, loss) for loss in df.prev_adj_close - df.adj_close]
+
+    # calculate relative strength with lookback window
+    df_temp = df.sort_values(by='date', ascending=True)
+    df['rs'] = df_temp.gains.rolling(lookback).mean() / df_temp.losses.rolling(lookback).mean()
+
+    # calculate rsi
+    df['rsi'] = 100 - (100 / (1 + df.rs))
+
+    # calculate signals
+    df['buy_signal'] = df.rsi < oversold
+    df['buy_signal'] = df.buy_signal.astype(int)
+    df['sell_signal'] = df.rsi > overbought
+    df['sell_signal'] = df.sell_signal.astype(int)
+
+    return df
+
+
+def backtest(ticker, date_start='2015-01-01', date_end='2024-12-31', runs=1000, test_significance=True,
+             signals=True):
+    data = api_pull(symbol='tsla', outputsize='full', apikey='meep')
+    stock = model_prices(data, date_start, date_end)
+    rsi_df = rsi(stock)
+
+    returns = []
+
+    print(f'\n======== TESTING {ticker} ========\n')
+
+    buys = 0
+    sells = 0
+    for i in range(0, runs):
+        k = np.random.randint(14, len(rsi_df)-1)
+
+        test = rsi_df.iloc[k]
+        test_nextday = rsi_df.iloc[k + 1]
+        test_prevday = rsi_df.iloc[k - 1]
+
+        if test.buy_signal == 1:
+            retx = np.log(test_nextday.adj_close) - np.log(test.adj_close)
+            if signals is True:
+                print(f'====> k = {k}\t| date = {test.date}\t| RSI = {test.rsi:.0f}\t| move: BUY\t| retx = {retx:.4f}')
+            returns.append(retx)
+            buys += 1
+
+        if test.sell_signal == 1:
+            retx = np.log(test.adj_close) - np.log(test_prevday.adj_close)
+            if signals is True:
+                print(f'====> k = {k}\t| date = {test.date}\t| RSI = {test.rsi:.0f}\t| move: SELL\t| retx = {retx:.4f}')
+            returns.append(retx)
+            sells += 1
+
+    # Print results
+    if test_significance is True:
+        # plot histogram
+        plt.hist(returns, bins=20)
+        plt.gcf().set_size_inches(10, 5)
+        plt.title(f'{ticker} distribution of returns')
+        plt.show()
+
+        result = statistical_significance(returns)
+        print('\n======== RESULTS ========')
+        print(f"Mean Return: {result['mean_return']:.6f}")
+        print(f"t-statistic: {result['t_statistic']:.4f}")
+        print(f"p-value: {result['p_value']:.4f}")
+        print(f"Significance level (alpha): {result['alpha']}")
+        print(f"Is statistically significant: {result['significant']}")
+
+    return returns
+
+
+def main():
+    # backtest for 20 stocks
+    #can be any amount of stocks 
+                    
+    stocks = ['AAPL','MSFT', 'JNJ', 'XOM', 'WMT', 'PG', 'JPM', 'BABA', 'DIS', 'MRK',
+              'AMD', 'DAL', 'AMC', 'F', 'SQ', 'COST', 'SBUX', 'MCD', 'VZ', 'CHWY']
+    backtest_results = {}
+    for ticker in stocks:
+        backtest_results[ticker] = backtest(ticker, test_significance=False, signals=False)
+
+    # pool returns
+    returns = []
+    for ticker, retx in backtest_results.items():
+        returns.extend(retx)
+
+    # plot histogram
+    plt.hist(returns, bins=25, edgecolor='black', alpha=.7)
+    plt.gcf().set_size_inches(10, 5)
+    plt.title('20 stocks distribution of returns')
+
+    # calculate significance
+    result = statistical_significance(returns)
+    print('\n======== RESULTS ========')
+    print(f"Mean Return: {result['mean_return']:.6f}")
+    print(f"t-statistic: {result['t_statistic']:.4f}")
+    print(f"p-value: {result['p_value']:.4f}")
+    print(f"Significance level (alpha): {result['alpha']}")
+    print(f"Is statistically significant: {result['significant']}")
+
+
+main()
+
